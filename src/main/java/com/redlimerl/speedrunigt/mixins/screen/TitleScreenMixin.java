@@ -19,7 +19,7 @@ public class TitleScreenMixin extends Screen {
     @Inject(method = "init", at = @At("TAIL"))
     private void onInit(CallbackInfo ci) {
         int x = this.width / 2 - 100;
-        int y = this.height / 4 + 48 + 24 * 5;
+        int y = this.height / 4 + 48 + 24 * 6;
         this.addDrawableChild(ButtonWidgetHelper.create(
                 x, y, 200, 20,
                 Text.translatable("speedrunigt.race.button"),

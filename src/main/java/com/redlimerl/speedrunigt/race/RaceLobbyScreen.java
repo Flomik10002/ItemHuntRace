@@ -27,6 +27,7 @@ public class RaceLobbyScreen extends Screen {
 
     private ButtonWidget startButton;
     private ButtonWidget readyButton;
+    private ButtonWidget copyCodeButton;
 
     public RaceLobbyScreen(Screen parent) {
         super(Text.translatable("speedrunigt.race.title"));
@@ -41,20 +42,20 @@ public class RaceLobbyScreen extends Screen {
         lastState = race.getState();
 
         int centerX = this.width / 2;
-        int y = 64;
+        int y = 78;
 
         if (race.getState() == RaceState.IDLE) {
             this.serverUriField = new TextFieldWidget(this.textRenderer, centerX - 100, y, 200, 20, Text.translatable("speedrunigt.race.server"));
             this.serverUriField.setText(race.getServerUri().toString());
             this.addDrawableChild(this.serverUriField);
 
-            y += 52;
+            y += 64;
 
             this.roomCodeField = new TextFieldWidget(this.textRenderer, centerX - 100, y, 200, 20, Text.translatable("speedrunigt.race.room_code"));
             this.roomCodeField.setMaxLength(12);
             this.addDrawableChild(this.roomCodeField);
 
-            y += 44;
+            y += 56;
 
             this.addDrawableChild(ButtonWidgetHelper.create(centerX - 100, y, 98, 20, Text.translatable("speedrunigt.race.create_room"), button -> {
                 applyServerUri();
@@ -65,7 +66,8 @@ public class RaceLobbyScreen extends Screen {
                 if (roomCodeField != null) race.joinRoom(roomCodeField.getText());
             }));
         } else {
-            if (race.getState() == RaceState.LOBBY) {
+
+            if (race.getState() == RaceState.LOBBY || race.getState() == RaceState.FINISHED) {
                 this.startButton = this.addDrawableChild(ButtonWidgetHelper.create(centerX - 100, this.height - 108, 200, 20, Text.translatable("speedrunigt.race.start"), button -> {
                     race.requestStart();
                     updateStartButton();
@@ -112,9 +114,18 @@ public class RaceLobbyScreen extends Screen {
     private void updateStartButton() {
         if (startButton == null) return;
         RaceSessionManager race = RaceSessionManager.getInstance();
-        boolean canStart = race.getState() == RaceState.LOBBY && race.areAllPlayersReady();
+        boolean inWorld = this.client != null && this.client.world != null;
+        boolean canStart = !inWorld &&
+                (race.getState() == RaceState.LOBBY || race.getState() == RaceState.FINISHED) &&
+                race.areAllPlayersReady();
         startButton.active = canStart;
-        startButton.setMessage(canStart ? Text.translatable("speedrunigt.race.start") : Text.translatable("speedrunigt.race.start_waiting"));
+        if (canStart) {
+            startButton.setMessage(Text.translatable("speedrunigt.race.start"));
+        } else if (inWorld) {
+            startButton.setMessage(Text.translatable("speedrunigt.race.start_leave_world"));
+        } else {
+            startButton.setMessage(Text.translatable("speedrunigt.race.start_waiting"));
+        }
     }
 
     @Override
@@ -130,7 +141,12 @@ public class RaceLobbyScreen extends Screen {
 
     @Override
     public void close() {
-        if (this.client != null) this.client.setScreen(parent);
+        if (this.client == null) return;
+        if (this.client.world != null) {
+            this.client.setScreen(null);
+        } else {
+            this.client.setScreen(parent);
+        }
     }
 
     @Override
@@ -159,11 +175,11 @@ public class RaceLobbyScreen extends Screen {
             return;
         }
 
-        int y = 44;
+        int y = 40;
         context.drawCenteredTextWithShadow(this.textRenderer, Text.translatable("speedrunigt.race.room_code.label", race.getRoomCode()), centerX, y, Colors.WHITE);
 
-        int infoTop = 68;
-        renderPlayerListTopLeft(context, 14, infoTop, race.getPlayers());
+        int infoTop = 86;
+        renderPlayerListTopLeft(context, 20, infoTop, race.getPlayers());
         renderTargetSection(context, centerX, infoTop);
 
         if (race.getState() == RaceState.STARTING) {

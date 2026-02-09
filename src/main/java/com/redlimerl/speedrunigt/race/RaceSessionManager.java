@@ -5,10 +5,13 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
+import com.google.gson.JsonPrimitive;
 import com.redlimerl.speedrunigt.SpeedRunIGT;
 import com.redlimerl.speedrunigt.timer.InGameTimer;
 import com.redlimerl.speedrunigt.timer.InGameTimerUtils;
+import com.redlimerl.speedrunigt.timer.TimerStatus;
 import com.redlimerl.speedrunigt.timer.category.RunCategories;
+import com.redlimerl.speedrunigt.timer.running.RunType;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.client.MinecraftClient;
@@ -72,7 +75,7 @@ public final class RaceSessionManager {
     private volatile ConnectionStatus connectionStatus = ConnectionStatus.DISCONNECTED;
     private volatile String lastError = null;
 
-    private URI serverUri = URI.create(System.getProperty(SERVER_URI_PROPERTY, "ws://localhost:8080"));
+    private URI serverUri = URI.create(System.getProperty(SERVER_URI_PROPERTY, "ws://flomik.xyz:8080"));
     private WebSocket webSocket = null;
     private final Queue<String> pendingMessages = new ConcurrentLinkedQueue<>();
     private final StringBuilder partialMessage = new StringBuilder();
@@ -85,6 +88,7 @@ public final class RaceSessionManager {
 
     private String seedString = null;
     private Identifier targetItemId = null;
+    private String pendingWorldDirectoryName = null;
 
     private long startScheduledAt = 0L;
     private boolean worldCreationRequested = false;
@@ -169,15 +173,19 @@ public final class RaceSessionManager {
 
         lastError = null;
         connectionStatus = ConnectionStatus.CONNECTING;
-        httpClient.newWebSocketBuilder()
-                .buildAsync(serverUri, new WsListener())
-                .whenComplete((ws, err) -> {
-                    if (err != null) {
-                        MinecraftClient.getInstance().execute(() -> onConnectionFailed(err));
-                    } else {
-                        MinecraftClient.getInstance().execute(() -> onConnected(ws));
-                    }
-                });
+        try {
+            httpClient.newWebSocketBuilder()
+                    .buildAsync(serverUri, new WsListener())
+                    .whenComplete((ws, err) -> {
+                        if (err != null) {
+                            MinecraftClient.getInstance().execute(() -> onConnectionFailed(err));
+                        } else {
+                            MinecraftClient.getInstance().execute(() -> onConnected(ws));
+                        }
+                    });
+        } catch (Exception e) {
+            onConnectionFailed(e);
+        }
     }
 
     public void disconnect() {
@@ -228,22 +236,40 @@ public final class RaceSessionManager {
     public void setReady(boolean ready) {
         if (state != RaceState.LOBBY && state != RaceState.STARTING && state != RaceState.FINISHED) return;
         localReady = ready;
-        if (!ready && state == RaceState.STARTING) {
-            cancelStarting();
+        applyLocalReadyToPlayers();
+
+        JsonObject readyMsg = new JsonObject();
+        readyMsg.addProperty("type", "ready");
+        readyMsg.addProperty("roomCode", roomCode);
+        readyMsg.addProperty("ready", ready);
+        readyMsg.addProperty("playerName", getClientPlayerName());
+        send(readyMsg);
+
+        if (!ready) {
+            sendCancelStart();
         }
+    }
+
+    public void requestStart() {
+        if (state != RaceState.LOBBY && state != RaceState.FINISHED) return;
+        if (!areAllPlayersReady()) return;
         JsonObject msg = new JsonObject();
-        msg.addProperty("type", "ready");
+        msg.addProperty("type", "start_request");
         msg.addProperty("roomCode", roomCode);
-        msg.addProperty("ready", ready);
         msg.addProperty("playerName", getClientPlayerName());
         send(msg);
     }
 
-    public void requestStart() {
-        if (state != RaceState.LOBBY) return;
-        if (!areAllPlayersReady()) return;
+    private void sendCancelStart() {
+        if (roomCode == null || roomCode.isEmpty()) return;
+        sendCancelStartType("cancel_start");
+        sendCancelStartType("start_cancel");
+        sendCancelStartType("cancel_start_request");
+    }
+
+    private void sendCancelStartType(String type) {
         JsonObject msg = new JsonObject();
-        msg.addProperty("type", "start_request");
+        msg.addProperty("type", type);
         msg.addProperty("roomCode", roomCode);
         msg.addProperty("playerName", getClientPlayerName());
         send(msg);
@@ -258,6 +284,32 @@ public final class RaceSessionManager {
         finishTriggered.set(false);
         seedString = null;
         targetItemId = null;
+        pendingWorldDirectoryName = null;
+    }
+
+    private void applyLocalReadyToPlayers() {
+        if (players.isEmpty()) return;
+        String local = normalizePlayerKey(getClientPlayerName());
+        for (int i = 0; i < players.size(); i++) {
+            PlayerStatus p = players.get(i);
+            if (normalizePlayerKey(p.name()).equals(local)) {
+                if (p.ready() != localReady) {
+                    players.set(i, new PlayerStatus(p.id(), p.name(), localReady));
+                }
+                return;
+            }
+        }
+    }
+
+    private void syncLocalReadyFromPlayers() {
+        if (players.isEmpty()) return;
+        String local = normalizePlayerKey(getClientPlayerName());
+        for (PlayerStatus p : players) {
+            if (normalizePlayerKey(p.name()).equals(local)) {
+                localReady = p.ready();
+                return;
+            }
+        }
     }
 
     public void finishRun(FinishReason reason) {
@@ -291,6 +343,7 @@ public final class RaceSessionManager {
         finishTimesByPlayerName.clear();
         seedString = null;
         targetItemId = null;
+        pendingWorldDirectoryName = null;
         startScheduledAt = 0L;
         worldCreationRequested = false;
         timerConfigured = false;
@@ -311,13 +364,13 @@ public final class RaceSessionManager {
     private void startWorld(MinecraftClient client) {
         if (seedString == null || targetItemId == null) {
             lastError = "Missing START parameters";
-            resetToIdle();
+            cancelStarting();
             return;
         }
 
         if (client.world != null) {
             lastError = "You must be in the main menu to start a race world";
-            resetToIdle();
+            cancelStarting();
             return;
         }
 
@@ -327,6 +380,7 @@ public final class RaceSessionManager {
         InGameTimerUtils.IS_SET_SEED = true;
 
         String directoryName = makeWorldDirectoryName();
+        pendingWorldDirectoryName = directoryName;
         LevelInfo levelInfo = new LevelInfo(
                 "Item Hunt Race",
                 GameMode.SURVIVAL,
@@ -363,6 +417,7 @@ public final class RaceSessionManager {
         WebSocket ws = webSocket;
         if (connectionStatus != ConnectionStatus.CONNECTED || ws == null) {
             pendingMessages.add(payload);
+            connect();
             return;
         }
         ws.sendText(payload, true);
@@ -412,6 +467,7 @@ public final class RaceSessionManager {
                 if (msg.has("players") && msg.get("players").isJsonArray()) {
                     parsePlayers(msg.getAsJsonArray("players"));
                 }
+                syncLocalReadyFromPlayers();
                 state = RaceState.LOBBY;
                 finishTriggered.set(false);
                 lastError = null;
@@ -420,12 +476,18 @@ public final class RaceSessionManager {
                 if (msg.has("players") && msg.get("players").isJsonArray()) {
                     players.clear();
                     parsePlayers(msg.getAsJsonArray("players"));
+                    syncLocalReadyFromPlayers();
                 }
             }
             case "finish" -> {
                 String player = getStringFromKeys(msg, "playerName", "player", "name");
                 Long igt = getLongFromKeys(msg, "igtMs", "igt", "igt_ms", "igtMillis", "igt_millis");
                 Long rta = getLongFromKeys(msg, "rtaMs", "rta", "rta_ms", "rtaMillis", "rta_millis");
+                if ((igt == null || rta == null) && msg.has("time") && msg.get("time").isJsonObject()) {
+                    JsonObject time = msg.getAsJsonObject("time");
+                    if (igt == null) igt = getLongFromKeys(time, "igtMs", "igt", "igt_ms", "igtMillis", "igt_millis");
+                    if (rta == null) rta = getLongFromKeys(time, "rtaMs", "rta", "rta_ms", "rtaMillis", "rta_millis");
+                }
                 if (player != null && igt != null && rta != null) {
                     finishTimesByPlayerName.put(normalizePlayerKey(player), new FinishTime(igt, rta));
                 }
@@ -435,17 +497,24 @@ public final class RaceSessionManager {
                 if (winner == null || winner.isEmpty()) return;
 
                 FinishTime time = finishTimesByPlayerName.get(normalizePlayerKey(winner));
+                if (time == null) {
+                    Long igt = getLongFromKeys(msg, "igtMs", "igt", "igt_ms", "igtMillis", "igt_millis");
+                    Long rta = getLongFromKeys(msg, "rtaMs", "rta", "rta_ms", "rtaMillis", "rta_millis");
+                    if (igt != null && rta != null) time = new FinishTime(igt, rta);
+                }
                 if (time == null && normalizePlayerKey(winner).equals(normalizePlayerKey(getClientPlayerName()))) {
                     InGameTimer timer = InGameTimer.getInstance();
                     time = new FinishTime(timer.getInGameTime(false), timer.getRealTimeAttack());
                 }
                 sendWinnerChat(winner, time);
 
-                if (state != RaceState.IDLE) {
-                    state = RaceState.FINISHED;
-                    resetReadyAfterRace();
-                    InGameTimer.complete();
-                }
+                state = RaceState.FINISHED;
+                resetReadyAfterRace();
+                InGameTimer.complete();
+
+            }
+            case "start_cancelled", "cancel_start", "starting_cancelled", "start_cancel", "cancel_start_request" -> {
+                if (state == RaceState.STARTING) cancelStarting();
             }
             case "start" -> {
                 String seed = msg.has("seed") ? msg.get("seed").getAsString() : null;
@@ -476,7 +545,11 @@ public final class RaceSessionManager {
         if (timerConfigured) return;
         timerConfigured = true;
 
+        InGameTimer.start(pendingWorldDirectoryName, RunType.fromBoolean(InGameTimerUtils.IS_SET_SEED));
         InGameTimer timer = InGameTimer.getInstance();
+        timer.setCategory(RunCategories.CUSTOM, false);
+        timer.setUncompleted(false);
+
         timer.setCategory(RunCategories.CUSTOM, false);
         timer.setUncompleted(false);
     }
@@ -548,8 +621,60 @@ public final class RaceSessionManager {
         for (String key : keys) {
             if (obj.has(key) && obj.get(key).isJsonPrimitive()) {
                 try {
-                    return obj.get(key).getAsLong();
+                    JsonPrimitive primitive = obj.getAsJsonPrimitive(key);
+                    if (primitive.isNumber()) return primitive.getAsLong();
+                    if (primitive.isString()) {
+                        String s = primitive.getAsString();
+                        if (s == null || s.isEmpty()) continue;
+                        try {
+                            return Long.parseLong(s);
+                        } catch (NumberFormatException ignored) {
+                            Long parsed = parseTimeStringToMillis(s);
+                            if (parsed != null) return parsed;
+                        }
+                    }
                 } catch (Exception ignored) {}
+            }
+        }
+        return null;
+    }
+
+    private static Long parseTimeStringToMillis(String raw) {
+        if (raw == null) return null;
+        String s = raw.trim();
+        if (s.isEmpty()) return null;
+        if (s.startsWith("--")) return null;
+
+        // Formats: MM:SS.mmm or H:MM:SS.mmm
+        int dot = s.lastIndexOf('.');
+        int colon = s.lastIndexOf(':');
+        if (dot > 0 && colon > 0 && dot > colon) {
+            String msPart = s.substring(dot + 1);
+            String left = s.substring(0, dot);
+
+            int ms;
+            try {
+                String padded = msPart.length() >= 3 ? msPart.substring(0, 3) : (msPart + "000").substring(0, 3);
+                ms = Integer.parseInt(padded);
+            } catch (Exception ignored) {
+                return null;
+            }
+
+            String[] parts = left.split(":");
+            try {
+                if (parts.length == 2) {
+                    long minutes = Long.parseLong(parts[0]);
+                    long seconds = Long.parseLong(parts[1]);
+                    return (minutes * 60L + seconds) * 1000L + ms;
+                }
+                if (parts.length == 3) {
+                    long hours = Long.parseLong(parts[0]);
+                    long minutes = Long.parseLong(parts[1]);
+                    long seconds = Long.parseLong(parts[2]);
+                    return (hours * 3600L + minutes * 60L + seconds) * 1000L + ms;
+                }
+            } catch (Exception ignored) {
+                return null;
             }
         }
         return null;

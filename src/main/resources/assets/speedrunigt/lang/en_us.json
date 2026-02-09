@@ -22,6 +22,7 @@
   "speedrunigt.race.unready": "UNREADY",
   "speedrunigt.race.start": "START",
   "speedrunigt.race.start_waiting": "START (need all ready)",
+  "speedrunigt.race.start_leave_world": "START (leave world first)",
   "speedrunigt.race.players": "Players",
   "speedrunigt.race.target": "Target",
   "speedrunigt.race.starting": "Starting...",
