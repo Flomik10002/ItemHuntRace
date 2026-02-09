@@ -2,6 +2,7 @@ package com.redlimerl.speedrunigt.gui.screen;
 
 import com.redlimerl.speedrunigt.option.SpeedRunOption;
 import com.redlimerl.speedrunigt.option.SpeedRunOptions;
+import com.redlimerl.speedrunigt.race.RaceSessionManager;
 import com.redlimerl.speedrunigt.timer.InGameTimer;
 import com.redlimerl.speedrunigt.timer.TimerStatus;
 import com.redlimerl.speedrunigt.timer.category.CustomCategoryManager;
@@ -122,6 +123,7 @@ public class SpeedRunCategoryScreen extends Screen {
                         })
                         .pos(0, 0)
                         .build();
+                this.checkBox.active = !RaceSessionManager.getInstance().isRaceControlsLocked();
                 this.urlButton = ButtonWidgetHelper.create(0, 0, 30, 20, Text.translatable("speedrunigt.option.more"), button -> Util.getOperatingSystem().open(category.getLeaderboardUrl()));
                 children.add(urlButton);
                 children.add(checkBox);

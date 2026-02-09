@@ -5,6 +5,8 @@ import com.redlimerl.speedrunigt.instance.GameInstance;
 import com.redlimerl.speedrunigt.mixins.access.FontManagerAccessor;
 import com.redlimerl.speedrunigt.mixins.access.MinecraftClientAccessor;
 import com.redlimerl.speedrunigt.option.SpeedRunOption;
+import com.redlimerl.speedrunigt.race.RaceSessionManager;
+import com.redlimerl.speedrunigt.race.TargetItemTracker;
 import com.redlimerl.speedrunigt.timer.*;
 import com.redlimerl.speedrunigt.timer.category.RunCategories;
 import com.redlimerl.speedrunigt.utils.FontUtils;
@@ -98,6 +100,9 @@ public abstract class MinecraftClientMixin {
             SpeedRunOption.checkSave();
             this.saveTickCount = 0;
         }
+        MinecraftClient client = (MinecraftClient) (Object) this;
+        RaceSessionManager.getInstance().tick(client);
+        TargetItemTracker.tick(client);
     }
 
     @Inject(method = "render(Z)V", at = @At(value = "INVOKE", target = "Lnet/minecraft/util/Util;getMeasuringTimeNano()J", shift = At.Shift.AFTER))

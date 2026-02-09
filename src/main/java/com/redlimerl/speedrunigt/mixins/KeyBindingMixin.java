@@ -1,6 +1,7 @@
 package com.redlimerl.speedrunigt.mixins;
 
 import com.redlimerl.speedrunigt.SpeedRunIGTClient;
+import com.redlimerl.speedrunigt.race.RaceSessionManager;
 import com.redlimerl.speedrunigt.timer.InGameTimer;
 import com.redlimerl.speedrunigt.timer.InGameTimerClientUtils;
 import com.redlimerl.speedrunigt.timer.TimerStatus;
@@ -29,6 +30,7 @@ public abstract class KeyBindingMixin {
         InGameTimer timer = InGameTimer.getInstance();
         List<KeyBinding> keyBindings = KEY_TO_BINDINGS.get(key);
         if (timer.getStatus() == TimerStatus.NONE || timer.getStatus() == TimerStatus.COMPLETED_LEGACY || keyBindings == null) return;
+        boolean raceLocked = RaceSessionManager.getInstance().isRaceControlsLocked();
         for (KeyBinding keyBinding : keyBindings) {
             if (keyBinding != null && pressed) {
                 if (InGameTimerClientUtils.isFocusedClick() &&
@@ -41,12 +43,12 @@ public abstract class KeyBindingMixin {
                     timer.updateFirstInput();
                 }
                 if (keyBinding == SpeedRunIGTClient.timerResetKeyBinding) {
-                    if (timer.getCategory() == RunCategories.CUSTOM && timer.isResettable()) {
+                    if (!raceLocked && timer.getCategory() == RunCategories.CUSTOM && timer.isResettable()) {
                         InGameTimer.reset();
                     }
                 }
                 if (keyBinding == SpeedRunIGTClient.timerStopKeyBinding) {
-                    if (timer.getCategory() == RunCategories.CUSTOM && timer.isStarted()) {
+                    if (!raceLocked && timer.getCategory() == RunCategories.CUSTOM && timer.isStarted()) {
                         InGameTimer.complete();
                     }
                 }

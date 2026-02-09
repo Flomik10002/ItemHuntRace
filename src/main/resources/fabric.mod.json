@@ -3,10 +3,11 @@
   "id": "speedrunigt",
   "version": "${version}",
 
-  "name": "SpeedRunIGT",
+  "name": "ItemHuntRace",
   "description": "Displays the timer with RTA, IGT in Minecraft",
   "authors": [
-    "RedLime"
+    "RedLime",
+    "Flomik"
   ],
   "contact": {
     "sources": "https://github.com/RedLime/SpeedRunIGT"
