@@ -11,6 +11,8 @@ import com.redlimerl.speedrunigt.timer.category.condition.AdvancementCategoryCon
 import com.redlimerl.speedrunigt.timer.category.condition.CategoryCondition;
 import com.redlimerl.speedrunigt.timer.packet.TimerPacketUtils;
 import com.redlimerl.speedrunigt.timer.packet.packets.TimerAchieveAdvancementPacket;
+import com.redlimerl.speedrunigt.race.RaceSessionManager;
+import com.redlimerl.speedrunigt.race.RaceState;
 import net.minecraft.advancement.Advancement;
 import net.minecraft.advancement.AdvancementManager;
 import net.minecraft.advancement.AdvancementProgress;
@@ -66,6 +68,9 @@ public abstract class ClientAdvancementManagerMixin {
             if (timer.isCoop() && advancement.getAdvancement().display().isPresent()) {
                 TimerPacketUtils.sendClient2ServerPacket(client, new TimerAchieveAdvancementPacket(advancement.getAdvancementEntry()));
             }
+            if (RaceSessionManager.getInstance().getState() == RaceState.RUNNING && advancement.getAdvancement().display().isPresent()) {
+                RaceSessionManager.getInstance().sendAdvancementAchieved(advancement.getAdvancementEntry().id());
+            }
 
             // Custom Json category
             if (timer.getCategory().getConditionJson() != null) {
@@ -77,22 +82,18 @@ public abstract class ClientAdvancementManagerMixin {
                 timer.checkConditions();
             }
 
-            //How Did We Get Here
             if (timer.getCategory() == RunCategories.HOW_DID_WE_GET_HERE && Objects.equals(advancement.getAdvancementEntry().id().toString(), Identifier.of("nether/all_effects").toString())) {
                 InGameTimer.complete();
             }
 
-            //Hero of Village
             if (timer.getCategory() == RunCategories.HERO_OF_VILLAGE && Objects.equals(advancement.getAdvancementEntry().id().toString(), Identifier.of("adventure/hero_of_the_village").toString())) {
                 InGameTimer.complete();
             }
 
-            //Arbalistic
             if (timer.getCategory() == RunCategories.ARBALISTIC && Objects.equals(advancement.getAdvancementEntry().id().toString(), Identifier.of("adventure/arbalistic").toString())) {
                 InGameTimer.complete();
             }
 
-            //Cover Me In Debris
             if (timer.getCategory() == RunCategories.COVER_ME_IN_DEBRIS && Objects.equals(advancement.getAdvancementEntry().id().toString(), Identifier.of("nether/netherite_armor").toString())) {
                 InGameTimer.complete();
             }

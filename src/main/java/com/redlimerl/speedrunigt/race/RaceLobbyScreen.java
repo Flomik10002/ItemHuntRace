@@ -37,6 +37,7 @@ public class RaceLobbyScreen extends Screen {
     @Override
     protected void init() {
         this.clearChildren();
+        this.copyCodeButton = null;
 
         RaceSessionManager race = RaceSessionManager.getInstance();
         lastState = race.getState();
@@ -66,6 +67,22 @@ public class RaceLobbyScreen extends Screen {
                 if (roomCodeField != null) race.joinRoom(roomCodeField.getText());
             }));
         } else {
+
+            if (!race.getRoomCode().isEmpty()) {
+                this.copyCodeButton = this.addDrawableChild(
+                        ButtonWidgetHelper.create(centerX + 70, 34, 90, 20,
+                                Text.translatable("speedrunigt.race.copy_code"),
+                                button -> {
+                                    if (this.client != null) {
+                                        this.client.keyboard.setClipboard(race.getRoomCode());
+                                        if (this.client.inGameHud != null) {
+                                            this.client.inGameHud.getChatHud().addMessage(Text.translatable("speedrunigt.race.copied_code", race.getRoomCode()));
+                                        }
+                                    }
+                                }
+                        )
+                );
+            }
 
             if (race.getState() == RaceState.LOBBY || race.getState() == RaceState.FINISHED) {
                 this.startButton = this.addDrawableChild(ButtonWidgetHelper.create(centerX - 100, this.height - 108, 200, 20, Text.translatable("speedrunigt.race.start"), button -> {

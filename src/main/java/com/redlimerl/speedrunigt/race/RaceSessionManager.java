@@ -15,8 +15,10 @@ import com.redlimerl.speedrunigt.timer.running.RunType;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.ClientAdvancementManager;
 import net.minecraft.client.gui.hud.ChatHud;
 import net.minecraft.client.gui.screen.Screen;
+import net.minecraft.advancement.PlacedAdvancement;
 import net.minecraft.registry.Registries;
 import net.minecraft.text.MutableText;
 import net.minecraft.text.Text;
@@ -47,6 +49,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Queue;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -58,6 +61,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class RaceSessionManager {
     public enum ConnectionStatus { DISCONNECTED, CONNECTING, CONNECTED }
     public enum FinishReason { TARGET_OBTAINED, DEATH }
+    private String activeRaceWorldName = null;
 
     public record PlayerStatus(UUID id, String name, boolean ready) {}
 
@@ -85,10 +89,14 @@ public final class RaceSessionManager {
     private boolean localReady = false;
     private final List<PlayerStatus> players = new ArrayList<>();
     private final ConcurrentHashMap<String, FinishTime> finishTimesByPlayerName = new ConcurrentHashMap<>();
+    private final Set<String> announcedAdvancements = ConcurrentHashMap.newKeySet();
 
     private String seedString = null;
     private Identifier targetItemId = null;
     private String pendingWorldDirectoryName = null;
+    private boolean startRequested = false;
+    private long startRequestSentAt = 0L;
+    private boolean autoStartDetected = false;
 
     private long startScheduledAt = 0L;
     private boolean worldCreationRequested = false;
@@ -148,6 +156,15 @@ public final class RaceSessionManager {
         return state == RaceState.RUNNING && targetItemId != null;
     }
 
+    private boolean isLocalPlayerLeader() {
+        if (players.isEmpty()) return true;
+        return normalizePlayerKey(players.get(0).name()).equals(normalizePlayerKey(getClientPlayerName()));
+    }
+
+    private boolean shouldSuppressLeaderReadyTrueToServer() {
+        return autoStartDetected && isLocalPlayerLeader() && (state == RaceState.LOBBY || state == RaceState.FINISHED);
+    }
+
     public URI getServerUri() {
         return serverUri;
     }
@@ -166,6 +183,13 @@ public final class RaceSessionManager {
             state = RaceState.RUNNING;
             configureTimerForRace();
         }
+    }
+
+
+    private void sendSystemChat(String msg) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.inGameHud != null)
+            client.inGameHud.getChatHud().addMessage(Text.literal(msg));
     }
 
     public void connect() {
@@ -235,24 +259,38 @@ public final class RaceSessionManager {
 
     public void setReady(boolean ready) {
         if (state != RaceState.LOBBY && state != RaceState.STARTING && state != RaceState.FINISHED) return;
+
         localReady = ready;
         applyLocalReadyToPlayers();
 
-        JsonObject readyMsg = new JsonObject();
-        readyMsg.addProperty("type", "ready");
-        readyMsg.addProperty("roomCode", roomCode);
-        readyMsg.addProperty("ready", ready);
-        readyMsg.addProperty("playerName", getClientPlayerName());
-        send(readyMsg);
-
         if (!ready) {
-            sendCancelStart();
+            sendReadyToServer(false);
+            startRequested = false;
+
+            if (state == RaceState.STARTING && !worldCreationRequested && MinecraftClient.getInstance().world == null) {
+                sendCancelStart();
+                cancelStarting();
+            }
+            return;
+        }
+
+        if (!shouldSuppressLeaderReadyTrueToServer()) {
+            sendReadyToServer(true);
         }
     }
 
     public void requestStart() {
         if (state != RaceState.LOBBY && state != RaceState.FINISHED) return;
-        if (!areAllPlayersReady()) return;
+        if (!localReady) return;
+        if (!areAllPlayersReadyOrUnknown()) return;
+        if (MinecraftClient.getInstance().world != null) return;
+
+        if (shouldSuppressLeaderReadyTrueToServer()) {
+            sendReadyToServer(true);
+        }
+
+        startRequested = true;
+        startRequestSentAt = System.currentTimeMillis();
         JsonObject msg = new JsonObject();
         msg.addProperty("type", "start_request");
         msg.addProperty("roomCode", roomCode);
@@ -260,11 +298,40 @@ public final class RaceSessionManager {
         send(msg);
     }
 
+    public void sendAdvancementAchieved(Identifier id) {
+        if (state != RaceState.RUNNING) return;
+        if (id == null || roomCode == null || roomCode.isEmpty()) return;
+        if (!announcedAdvancements.add(id.toString())) return;
+
+        JsonObject msg = new JsonObject();
+        msg.addProperty("type", "advancement");
+        msg.addProperty("roomCode", roomCode);
+        msg.addProperty("playerName", getClientPlayerName());
+        msg.addProperty("advancementId", id.toString());
+        send(msg);
+    }
+
+    private void sendReadyToServer(boolean ready) {
+        JsonObject msg = new JsonObject();
+        msg.addProperty("type", "ready");
+        msg.addProperty("roomCode", roomCode);
+        msg.addProperty("ready", ready);
+        msg.addProperty("playerName", getClientPlayerName());
+        send(msg);
+    }
+
+    private boolean areAllPlayersReadyOrUnknown() {
+        if (players.isEmpty()) return localReady;
+        return areAllPlayersReady();
+    }
+
     private void sendCancelStart() {
         if (roomCode == null || roomCode.isEmpty()) return;
         sendCancelStartType("cancel_start");
         sendCancelStartType("start_cancel");
         sendCancelStartType("cancel_start_request");
+        sendCancelStartType("stop_start");
+        sendCancelStartType("abort_start");
     }
 
     private void sendCancelStartType(String type) {
@@ -285,6 +352,9 @@ public final class RaceSessionManager {
         seedString = null;
         targetItemId = null;
         pendingWorldDirectoryName = null;
+        activeRaceWorldName = null;
+        announcedAdvancements.clear();
+        startRequested = false;
     }
 
     private void applyLocalReadyToPlayers() {
@@ -306,7 +376,9 @@ public final class RaceSessionManager {
         String local = normalizePlayerKey(getClientPlayerName());
         for (PlayerStatus p : players) {
             if (normalizePlayerKey(p.name()).equals(local)) {
-                localReady = p.ready();
+                if (!shouldSuppressLeaderReadyTrueToServer() || !localReady) {
+                    localReady = p.ready();
+                }
                 return;
             }
         }
@@ -316,13 +388,24 @@ public final class RaceSessionManager {
         if (state != RaceState.RUNNING) return;
         if (!finishTriggered.compareAndSet(false, true)) return;
 
-        state = RaceState.FINISHED;
-        resetReadyAfterRace();
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.getServer() == null || activeRaceWorldName == null) return;
+
+        String current = client.getServer().getSavePath(net.minecraft.util.WorldSavePath.ROOT)
+                .getParent().getFileName().toString();
+
+        if (!current.equals(activeRaceWorldName)) {
+            sendSystemChat("§cFinish ignored: not in race world");
+            return;
+        }
 
         InGameTimer.complete();
         InGameTimer timer = InGameTimer.getInstance();
 
-        finishTimesByPlayerName.put(normalizePlayerKey(getClientPlayerName()), new FinishTime(timer.getInGameTime(false), timer.getRealTimeAttack()));
+        finishTimesByPlayerName.put(
+                normalizePlayerKey(getClientPlayerName()),
+                new FinishTime(timer.getInGameTime(false), timer.getRealTimeAttack())
+        );
 
         JsonObject msg = new JsonObject();
         msg.addProperty("type", "finish");
@@ -331,7 +414,6 @@ public final class RaceSessionManager {
         msg.addProperty("reason", reason.name().toLowerCase(Locale.ROOT));
         msg.addProperty("rtaMs", timer.getRealTimeAttack());
         msg.addProperty("igtMs", timer.getInGameTime(false));
-        if (targetItemId != null) msg.addProperty("targetItemId", targetItemId.toString());
         send(msg);
     }
 
@@ -341,24 +423,18 @@ public final class RaceSessionManager {
         localReady = false;
         players.clear();
         finishTimesByPlayerName.clear();
+        announcedAdvancements.clear();
         seedString = null;
         targetItemId = null;
         pendingWorldDirectoryName = null;
+        startRequested = false;
+        startRequestSentAt = 0L;
+        autoStartDetected = false;
         startScheduledAt = 0L;
         worldCreationRequested = false;
         timerConfigured = false;
         finishTriggered.set(false);
-    }
-
-    private void resetReadyAfterRace() {
-        localReady = false;
-        if (state == RaceState.IDLE || roomCode.isEmpty()) return;
-        JsonObject msg = new JsonObject();
-        msg.addProperty("type", "ready");
-        msg.addProperty("roomCode", roomCode);
-        msg.addProperty("ready", false);
-        msg.addProperty("playerName", getClientPlayerName());
-        send(msg);
+        activeRaceWorldName = null;
     }
 
     private void startWorld(MinecraftClient client) {
@@ -369,7 +445,7 @@ public final class RaceSessionManager {
         }
 
         if (client.world != null) {
-            lastError = "You must be in the main menu to start a race world";
+            lastError = "Must be in menu to start race world";
             cancelStarting();
             return;
         }
@@ -379,36 +455,27 @@ public final class RaceSessionManager {
 
         InGameTimerUtils.IS_SET_SEED = true;
 
-        String directoryName = makeWorldDirectoryName();
-        pendingWorldDirectoryName = directoryName;
-        LevelInfo levelInfo = new LevelInfo(
-                "Item Hunt Race",
-                GameMode.SURVIVAL,
-                true,
-                Difficulty.HARD,
-                false,
+        String dir = makeWorldDirectoryName();
+        pendingWorldDirectoryName = dir;
+        activeRaceWorldName = dir;
+
+        LevelInfo info = new LevelInfo("Item Hunt Race", GameMode.SURVIVAL, true,
+                Difficulty.HARD, false,
                 new GameRules(FeatureFlags.DEFAULT_ENABLED_FEATURES),
-                new DataConfiguration(DataPackSettings.SAFE_MODE, FeatureFlags.DEFAULT_ENABLED_FEATURES)
-        );
+                new DataConfiguration(DataPackSettings.SAFE_MODE, FeatureFlags.DEFAULT_ENABLED_FEATURES));
 
-        GeneratorOptions generatorOptions = new GeneratorOptions(seed, true, false);
+        GeneratorOptions options = new GeneratorOptions(seed, true, false);
 
-        IntegratedServerLoader loader = client.createIntegratedServerLoader();
-        Screen parent = client.currentScreen;
-        loader.createAndStart(
-                directoryName,
-                levelInfo,
-                generatorOptions,
-                wrapperLookup -> {
-                    WorldPreset preset = wrapperLookup.getOrThrow(RegistryKeys.WORLD_PRESET).getOrThrow(WorldPresets.DEFAULT).value();
-                    return preset.createDimensionsRegistryHolder();
-                },
-                parent
+        client.createIntegratedServerLoader().createAndStart(
+                dir, info, options,
+                wrapper -> wrapper.getOrThrow(RegistryKeys.WORLD_PRESET)
+                        .getOrThrow(WorldPresets.DEFAULT).value().createDimensionsRegistryHolder(),
+                client.currentScreen
         );
     }
 
     private String makeWorldDirectoryName() {
-        String code = roomCode == null || roomCode.isEmpty() ? "race" : roomCode.toLowerCase(Locale.ROOT);
+        String code = roomCode.isEmpty() ? "race" : roomCode.toLowerCase(Locale.ROOT);
         return "item_hunt_" + code + "_" + (System.currentTimeMillis() / 1000L);
     }
 
@@ -468,8 +535,12 @@ public final class RaceSessionManager {
                     parsePlayers(msg.getAsJsonArray("players"));
                 }
                 syncLocalReadyFromPlayers();
+                applyLocalReadyToPlayers();
                 state = RaceState.LOBBY;
                 finishTriggered.set(false);
+                startRequested = false;
+                startRequestSentAt = 0L;
+                autoStartDetected = false;
                 lastError = null;
             }
             case "room_update" -> {
@@ -477,6 +548,7 @@ public final class RaceSessionManager {
                     players.clear();
                     parsePlayers(msg.getAsJsonArray("players"));
                     syncLocalReadyFromPlayers();
+                    applyLocalReadyToPlayers();
                 }
             }
             case "finish" -> {
@@ -490,6 +562,27 @@ public final class RaceSessionManager {
                 }
                 if (player != null && igt != null && rta != null) {
                     finishTimesByPlayerName.put(normalizePlayerKey(player), new FinishTime(igt, rta));
+                }
+            }
+            case "advancement" -> {
+                String player = getStringFromKeys(msg, "playerName", "player", "name");
+                String adv = getStringFromKeys(msg, "advancementId", "advancement", "id");
+                if (player == null || adv == null) return;
+                Identifier id = Identifier.tryParse(adv);
+                sendAdvancementChat(player, id);
+            }
+            case "player_result" -> {
+                String player = getStringFromKeys(msg, "player");
+                String reason = getStringFromKeys(msg, "reason");
+                Long igt = getLongFromKeys(msg, "igtMs");
+                Long rta = getLongFromKeys(msg, "rtaMs");
+
+                if (player == null || reason == null) return;
+
+                if ("death".equals(reason)) {
+                    sendSystemChat("§7☠ " + player + " died (" + InGameTimerUtils.timeToStringFormat(rta) + ")");
+                } else {
+                    sendWinnerChat(player, new FinishTime(igt, rta));
                 }
             }
             case "winner" -> {
@@ -507,16 +600,31 @@ public final class RaceSessionManager {
                     time = new FinishTime(timer.getInGameTime(false), timer.getRealTimeAttack());
                 }
                 sendWinnerChat(winner, time);
-
-                state = RaceState.FINISHED;
-                resetReadyAfterRace();
-                InGameTimer.complete();
-
             }
-            case "start_cancelled", "cancel_start", "starting_cancelled", "start_cancel", "cancel_start_request" -> {
+            case "start_cancelled", "cancel_start", "starting_cancelled", "start_cancel", "cancel_start_request", "stop_start", "abort_start" -> {
                 if (state == RaceState.STARTING) cancelStarting();
+                startRequested = false;
             }
             case "start" -> {
+                boolean requestedRecently = startRequested && (System.currentTimeMillis() - startRequestSentAt) < 15000L;
+                if (isLocalPlayerLeader() && !requestedRecently && (state == RaceState.LOBBY || state == RaceState.FINISHED)) {
+                    autoStartDetected = true;
+                    startRequested = false;
+                    startRequestSentAt = 0L;
+
+                    if (localReady) {
+                        sendReadyToServer(false);
+                        applyLocalReadyToPlayers();
+                    }
+                    sendCancelStart();
+                    lastError = "Auto-start blocked: press START";
+                    return;
+                }
+
+                startRequested = false;
+                startRequestSentAt = 0L;
+                announcedAdvancements.clear();
+
                 String seed = msg.has("seed") ? msg.get("seed").getAsString() : null;
                 String target = msg.has("targetItemId") ? msg.get("targetItemId").getAsString() : null;
                 if (seed == null || target == null) return;
@@ -545,11 +653,11 @@ public final class RaceSessionManager {
         if (timerConfigured) return;
         timerConfigured = true;
 
-        InGameTimer.start(pendingWorldDirectoryName, RunType.fromBoolean(InGameTimerUtils.IS_SET_SEED));
         InGameTimer timer = InGameTimer.getInstance();
-        timer.setCategory(RunCategories.CUSTOM, false);
-        timer.setUncompleted(false);
-
+        if (timer.getStatus() == TimerStatus.NONE && pendingWorldDirectoryName != null && !pendingWorldDirectoryName.isEmpty()) {
+            InGameTimer.start(pendingWorldDirectoryName, RunType.fromBoolean(InGameTimerUtils.IS_SET_SEED));
+            timer = InGameTimer.getInstance();
+        }
         timer.setCategory(RunCategories.CUSTOM, false);
         timer.setUncompleted(false);
     }
@@ -589,6 +697,33 @@ public final class RaceSessionManager {
     }
 
     private record FinishTime(long igtMs, long rtaMs) {}
+
+    private void sendAdvancementChat(String playerName, Identifier advancementId) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.inGameHud == null) return;
+
+        Text title = advancementId != null ? Text.literal(advancementId.toString()) : Text.literal("unknown");
+        try {
+            if (advancementId != null && client.getNetworkHandler() != null) {
+                ClientAdvancementManager handler = client.getNetworkHandler().getAdvancementHandler();
+                if (handler != null) {
+                    PlacedAdvancement placed = handler.getManager().get(advancementId);
+                    if (placed != null && placed.getAdvancement().display().isPresent()) {
+                        title = placed.getAdvancement().display().get().getTitle();
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
+        client.inGameHud.getChatHud().addMessage(
+                Text.translatable(
+                                "speedrunigt.race.chat.advancement",
+                                Text.literal(playerName).formatted(Formatting.GOLD),
+                                title.copy().formatted(Formatting.GREEN)
+                        )
+                        .formatted(Formatting.WHITE)
+        );
+    }
 
     private void sendWinnerChat(String winnerName, FinishTime time) {
         MinecraftClient client = MinecraftClient.getInstance();
