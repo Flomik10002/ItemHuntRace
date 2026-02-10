@@ -6,6 +6,7 @@ import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gl.RenderPipelines;
+import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.ButtonWidget;
@@ -15,7 +16,6 @@ import net.minecraft.client.session.Session;
 import net.minecraft.entity.player.SkinTextures;
 import net.minecraft.item.ItemStack;
 import net.minecraft.registry.Registries;
-import net.minecraft.screen.ScreenTexts;
 import net.minecraft.text.MutableText;
 import net.minecraft.text.Text;
 import net.minecraft.util.ApiServices;
@@ -36,43 +36,37 @@ import java.util.function.Supplier;
 
 @Environment(EnvType.CLIENT)
 public class RaceLobbyScreen extends Screen {
-    private static final int ROOM_CODE_Y = 80;
-    private static final int COPY_CODE_BUTTON_WIDTH = 90;
-    private static final int COPY_CODE_BUTTON_HEIGHT = 20;
-    private static final int COPY_CODE_BUTTON_MARGIN_X = 6;
-    private final Screen parent;
+	    private final Screen parent;
 
     private RaceState lastState = null;
 
     private TextFieldWidget roomCodeField;
     private TextFieldWidget serverUriField;
 
-    private ButtonWidget startButton;
-    private ButtonWidget readyButton;
-    private ButtonWidget copyCodeButton;
+	    private ButtonWidget startButton;
+	    private ButtonWidget readyButton;
+	    private long codeCopiedUntil = 0;
 
-    private final ConcurrentHashMap<String, UUID> mojangUuidByNameKey = new ConcurrentHashMap<>();
-    private final Set<String> mojangUuidResolveInFlight = ConcurrentHashMap.newKeySet();
-    private final ConcurrentHashMap<String, Supplier<SkinTextures>> skinSupplierByNameKey = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Supplier<SkinTextures>> skinSupplierByUuidKey = new ConcurrentHashMap<>();
+	    private final ConcurrentHashMap<String, GameProfile> mojangProfileByNameKey = new ConcurrentHashMap<>();
+	    private final Set<String> mojangProfileResolveInFlight = ConcurrentHashMap.newKeySet();
+	    private final ConcurrentHashMap<String, Supplier<SkinTextures>> skinSupplierByNameKey = new ConcurrentHashMap<>();
 
-    public RaceLobbyScreen(Screen parent) {
-        super(Text.translatable("speedrunigt.race.title"));
-        this.parent = parent;
-    }
+	    public RaceLobbyScreen(Screen parent) {
+	        super(Text.translatable("speedrunigt.race.title"));
+	        this.parent = parent;
+	    }
 
     @Override
-    protected void init() {
-        this.clearChildren();
-        this.copyCodeButton = null;
+	    protected void init() {
+	        this.clearChildren();
 
-        RaceSessionManager race = RaceSessionManager.getInstance();
-        lastState = race.getState();
+	        RaceSessionManager race = RaceSessionManager.getInstance();
+	        lastState = race.getState();
 
-        int centerX = this.width / 2;
+	        int centerX = this.width / 2;
 
         // Check server health in IDLE state
-        if (race.getState() == RaceState.IDLE) {
+	        if (race.getState() == RaceState.IDLE) {
             race.checkServerHealth();
         }
 
@@ -119,30 +113,38 @@ public class RaceLobbyScreen extends Screen {
                 race.createRoom();
             }));
 
-        } else {
-            // IN LOBBY/GAME state: Show player list, ready button, etc.
+	        } else {
+	            // IN LOBBY/GAME state: Show player list, ready button, etc.
+	            int playersPanelWidth = Math.min(260, Math.max(200, this.width / 4));
+	            int playersPanelX = this.width - playersPanelWidth;
+	            int mainPanelWidth = Math.min(520, Math.max(320, playersPanelX - 80));
+	            int mainPanelX = Math.max(10, (playersPanelX - mainPanelWidth) / 2);
+	            int mainPanelY = 70;
+	            int mainPanelHeight = this.height - 110;
+	            int buttonWidth = Math.min(240, mainPanelWidth - 60);
+	            int buttonX = mainPanelX + (mainPanelWidth - buttonWidth) / 2;
 
-            if (race.getState() == RaceState.LOBBY || race.getState() == RaceState.FINISHED) {
-                this.startButton = this.addDrawableChild(ButtonWidgetHelper.create(centerX - 100, this.height - 108, 200, 20, Text.translatable("speedrunigt.race.start"), button -> {
-                    race.requestStart();
-                    updateStartButton();
-                }));
-            } else {
-                this.startButton = null;
-            }
+	            if (race.getState() == RaceState.LOBBY || race.getState() == RaceState.FINISHED) {
+	                this.startButton = this.addDrawableChild(ButtonWidgetHelper.create(buttonX, mainPanelY + mainPanelHeight - 84, buttonWidth, 20, Text.translatable("speedrunigt.race.start"), button -> {
+	                    race.requestStart();
+	                    updateStartButton();
+	                }));
+	            } else {
+	                this.startButton = null;
+	            }
 
-            int buttonY = this.height - 84;
-            this.readyButton = this.addDrawableChild(ButtonWidgetHelper.create(centerX - 100, buttonY, 200, 20, Text.translatable("speedrunigt.race.ready"), button -> {
-                race.setReady(!race.isLocalReady());
-                updateReadyButton();
-                updateStartButton();
-            }));
+	            int readyButtonY = mainPanelY + mainPanelHeight - 58;
+	            this.readyButton = this.addDrawableChild(ButtonWidgetHelper.create(buttonX, readyButtonY, buttonWidth, 20, Text.translatable("speedrunigt.race.ready"), button -> {
+	                race.setReady(!race.isLocalReady());
+	                updateReadyButton();
+	                updateStartButton();
+	            }));
 
-            this.addDrawableChild(ButtonWidgetHelper.create(centerX - 100, this.height - 60, 200, 20, Text.translatable("speedrunigt.race.leave_room"), button -> {
-                race.leaveRoom();
-                this.init(this.width, this.height);
-            }));
-        }
+	            this.addDrawableChild(ButtonWidgetHelper.create(buttonX, readyButtonY + 26, buttonWidth, 20, Text.translatable("speedrunigt.race.leave_room"), button -> {
+	                race.leaveRoom();
+	                this.init(this.width, this.height);
+	            }));
+	        }
 
         // Back button (bottom left)
         this.addDrawableChild(ButtonWidgetHelper.create(20, this.height - 30, 80, 20, 
@@ -219,37 +221,69 @@ public class RaceLobbyScreen extends Screen {
     }
 
     @Override
+    public boolean mouseClicked(Click click, boolean doubled) {
+        boolean consumed = super.mouseClicked(click, doubled);
+        if (!consumed && click.button() == 1) { // Right click
+            RaceSessionManager race = RaceSessionManager.getInstance();
+            if (race.getState() != RaceState.IDLE && !race.getRoomCode().isEmpty()) {
+                int playersPanelWidth = Math.min(260, Math.max(200, this.width / 4));
+                int playersPanelX = this.width - playersPanelWidth;
+                int mainPanelWidth = Math.min(520, Math.max(320, playersPanelX - 80));
+                int mainPanelX = Math.max(10, (playersPanelX - mainPanelWidth) / 2);
+                int mainPanelCenterX = mainPanelX + mainPanelWidth / 2;
+                int mainPanelY = 70;
+
+                String code = race.getRoomCode();
+                int codeWidth = (int) (this.textRenderer.getWidth(code) * 2.2f);
+                int codeHeight = (int) (this.textRenderer.fontHeight * 2.2f);
+                int codeY = mainPanelY + 48;
+
+                if (click.x() >= mainPanelCenterX - codeWidth / 2 - 5
+                        && click.x() <= mainPanelCenterX + codeWidth / 2 + 5
+                        && click.y() >= codeY - 2
+                        && click.y() <= codeY + codeHeight + 2) {
+                    if (this.client != null) {
+                        this.client.keyboard.setClipboard(code);
+                        codeCopiedUntil = System.currentTimeMillis() + 2000;
+                    }
+                    return true;
+                }
+            }
+        }
+        return consumed;
+    }
+
+    @Override
     public boolean shouldPause() {
         return false;
     }
 
     @Override
-    public void render(DrawContext context, int mouseX, int mouseY, float delta) {
-        RaceSessionManager race = RaceSessionManager.getInstance();
-        int centerX = this.width / 2;
+	    public void render(DrawContext context, int mouseX, int mouseY, float delta) {
+	        RaceSessionManager race = RaceSessionManager.getInstance();
+	        int centerX = this.width / 2;
 
-        // Title Image
-        Identifier titleTexture = Identifier.of("speedrunigt", "textures/ui/title.png");
-        int drawWidth = 204; 
-        int drawHeight = 36;
-        context.drawTexture(RenderPipelines.GUI_TEXTURED, titleTexture, centerX - (drawWidth / 2), 10, 0, 0, drawWidth, drawHeight, drawWidth, drawHeight);
+	        // Title Image
+	        Identifier titleTexture = Identifier.of("speedrunigt", "textures/ui/title.png");
+	        int drawWidth = 204; 
+	        int drawHeight = 36;
+	        context.drawTexture(RenderPipelines.GUI_TEXTURED, titleTexture, centerX - (drawWidth / 2), 10, 0, 0, drawWidth, drawHeight, drawWidth, drawHeight);
 
         // Subtitle: "Find items. Beat others. Win."
         context.drawCenteredTextWithShadow(this.textRenderer, 
                 Text.literal("Find items. Beat others. Win.").formatted(Formatting.GRAY), 
                 centerX, 50, 0xFFAAAAAA);
 
-        // Connection status (bottom right)
-        String statusText = "Connected to: " + race.getServerUri().toString().replace("ws://", "");
-        int statusX = Math.max(4, this.width - this.textRenderer.getWidth(statusText) - 4);
-        int statusY = this.height - this.textRenderer.fontHeight - 4;
-        context.drawTextWithShadow(this.textRenderer, statusText, statusX, statusY, 0xFFAAAAAA);
+	        // Connection status (bottom right)
+	        String statusText = "Connected to: " + race.getServerUri().toString().replace("ws://", "");
+	        int statusY = this.height - this.textRenderer.fontHeight - 4;
+	        context.drawCenteredTextWithShadow(this.textRenderer, Text.literal(statusText).formatted(Formatting.GRAY), centerX, statusY, 0xFFAAAAAA);
 
         if (race.getLastError() != null && !race.getLastError().isEmpty()) {
             context.drawCenteredTextWithShadow(this.textRenderer, race.getLastError(), centerX, this.height - 44, 0xFFFF5555);
         }
 
-        if (race.getState() == RaceState.IDLE) {
+	        if (race.getState() == RaceState.IDLE) {
             // IDLE STATE: Draw SERVER and ROOM boxes FIRST (before widgets)
             int boxWidth = 400;
             int boxX = centerX - boxWidth / 2;
@@ -316,23 +350,52 @@ public class RaceLobbyScreen extends Screen {
                     centerX, currentY + 76, 0xFFAAAAAA);
 
             // NOW render widgets on top - they will be drawn by the code below
-        } else {
-            // IN-LOBBY STATE: Show room code, player list, etc.
-            Text roomCodeText = Text.translatable("speedrunigt.race.room_code.label", race.getRoomCode());
-            context.drawCenteredTextWithShadow(this.textRenderer, roomCodeText, centerX, ROOM_CODE_Y, Colors.WHITE);
+	        } else {
+	            int playersPanelWidth = Math.min(260, Math.max(200, this.width / 4));
+	            int playersPanelX = this.width - playersPanelWidth;
+	            int playersPanelHeight = this.height;
+	            drawBox(context, playersPanelX, 0, playersPanelWidth, playersPanelHeight);
+	            renderPlayersPanel(context, playersPanelX, 0, playersPanelWidth, playersPanelHeight, race.getPlayers());
 
-            int infoTop = ROOM_CODE_Y + 36;
-            renderPlayerListTopLeft(context, 20, infoTop, race.getPlayers());
-            renderTargetSection(context, centerX, infoTop);
+	            int mainPanelWidth = Math.min(520, Math.max(320, playersPanelX - 80));
+	            int mainPanelX = Math.max(10, (playersPanelX - mainPanelWidth) / 2);
+	            int mainPanelY = 70;
+	            int mainPanelHeight = this.height - 110;
+	            int mainPanelCenterX = mainPanelX + mainPanelWidth / 2;
+	            drawBox(context, mainPanelX, mainPanelY, mainPanelWidth, mainPanelHeight);
 
-            if (race.getState() == RaceState.STARTING) {
-                renderCountdown(context, centerX, this.height / 2, race.getCountdownSecondsRemaining());
-            }
-        }
+	            Text header = race.getTargetItemId().isEmpty()
+	                    ? Text.literal("WAITING FOR ITEM LIST...").formatted(Formatting.GOLD, Formatting.BOLD)
+	                    : Text.literal("TARGET").formatted(Formatting.GOLD, Formatting.BOLD);
+	            context.drawCenteredTextWithShadow(this.textRenderer, header, mainPanelCenterX, mainPanelY + 12, 0xFFFFAA00);
 
-        // Render all widgets (buttons, text fields) on TOP of boxes
-        super.render(context, mouseX, mouseY, delta);
-    }
+	            context.drawCenteredTextWithShadow(this.textRenderer,
+	                    Text.literal("ROOM CODE:").formatted(Formatting.GRAY, Formatting.BOLD),
+	                    mainPanelCenterX, mainPanelY + 34, 0xFFCCCCCC);
+
+	            drawScaledCenteredText(context,
+	                    Text.literal(race.getRoomCode()).formatted(Formatting.YELLOW, Formatting.BOLD),
+	                    mainPanelCenterX, mainPanelY + 48, 2.2f, 0xFFFFFF55);
+
+	            // "RMB to copy" hint or "Copied!" feedback
+	            boolean showCopied = System.currentTimeMillis() < codeCopiedUntil;
+	            Text copyHint = showCopied
+	                    ? Text.literal("Copied!").formatted(Formatting.GREEN)
+	                    : Text.literal("RMB on code to copy").formatted(Formatting.DARK_GRAY);
+	            context.drawCenteredTextWithShadow(this.textRenderer, copyHint, mainPanelCenterX, mainPanelY + 72, showCopied ? 0xFF55FF55 : 0xFF666666);
+
+	            if (race.getTargetItemId().isPresent()) {
+	                renderTargetSection(context, mainPanelCenterX, mainPanelY + 92);
+	            }
+
+	            if (race.getState() == RaceState.STARTING) {
+	                renderCountdown(context, mainPanelCenterX, mainPanelY + mainPanelHeight / 2, race.getCountdownSecondsRemaining());
+	            }
+	        }
+
+	        // Render all widgets (buttons, text fields) on TOP of boxes
+	        super.render(context, mouseX, mouseY, delta);
+	    }
 
     private void drawBox(DrawContext context, int x, int y, int width, int height) {
         // Dark semi-transparent background
@@ -346,20 +409,12 @@ public class RaceLobbyScreen extends Screen {
         context.fill(x + width - 1, y, x + width, y + height, borderColor); // Right
     }
 
-    private void updateCopyCodeButtonPosition(int centerX, Text roomCodeText) {
-        if (copyCodeButton == null) return;
-
-        int textWidth = this.textRenderer.getWidth(roomCodeText);
-        int buttonX = centerX + (textWidth / 2) + COPY_CODE_BUTTON_MARGIN_X;
-        int buttonY = ROOM_CODE_Y + (this.textRenderer.fontHeight - COPY_CODE_BUTTON_HEIGHT) / 2;
-
-        if (buttonX + COPY_CODE_BUTTON_WIDTH > this.width - 4) {
-            buttonX = centerX - COPY_CODE_BUTTON_WIDTH / 2;
-            buttonY = ROOM_CODE_Y + this.textRenderer.fontHeight + 4;
-        }
-
-        copyCodeButton.setDimensionsAndPosition(COPY_CODE_BUTTON_WIDTH, COPY_CODE_BUTTON_HEIGHT, buttonX, buttonY);
-    }
+	    private void drawScaledCenteredText(DrawContext context, Text text, int centerX, int y, float scale, int color) {
+	        context.getMatrices().pushMatrix();
+	        context.getMatrices().scale(scale, scale);
+	        context.drawCenteredTextWithShadow(this.textRenderer, text, (int) (centerX / scale), (int) (y / scale), color);
+	        context.getMatrices().popMatrix();
+	    }
 
     private void renderInputLabels(DrawContext context, int centerX) {
         if (serverUriField != null) {
@@ -370,49 +425,72 @@ public class RaceLobbyScreen extends Screen {
         }
     }
 
-    private void renderPlayerListTopLeft(DrawContext context, int x, int startY, List<RaceSessionManager.PlayerStatus> players) {
-        int y = startY;
-        context.drawTextWithShadow(this.textRenderer, Text.translatable("speedrunigt.race.players"), x, y, Colors.WHITE);
-        y += 14;
-        
-        for (RaceSessionManager.PlayerStatus p : players) {
-            // Use name-based resolution because server IDs are random
-            Identifier skin = getPlayerSkinTexture(p.name());
-            
-            // Draw head (8,8 to 16,16)
-            context.drawTexture(RenderPipelines.GUI_TEXTURED, skin, x, y, 8, 8, 8, 8, 64, 64);
-            // Draw overlay (40,8 to 48,16)
-            context.drawTexture(RenderPipelines.GUI_TEXTURED, skin, x, y, 40, 8, 8, 8, 64, 64);
-            
-            int textX = x + 12;
-            MutableText nameText = Text.literal(p.name());
-            
-            if (p.isLeader()) {
-                nameText = Text.literal("LEADER ").formatted(Formatting.GOLD, Formatting.BOLD).append(nameText.formatted(Formatting.YELLOW));
-            } else {
-                nameText = nameText.formatted(Formatting.WHITE);
-            }
-            
-            context.drawTextWithShadow(this.textRenderer, nameText, textX, y, Colors.WHITE);
-            
-            // Readiness Indicator (Checkmark or Cross)
-            String readyIcon = p.ready() ? "✔" : "✖";
-            int readyColor = p.ready() ? 0xFF55FF55 : 0xFFCCCCCC; // Green or Gray
-            int readyX = x + 120; // Fixed width for name column
-            context.drawTextWithShadow(this.textRenderer, readyIcon, readyX, y, readyColor);
+	    private void renderPlayersPanel(DrawContext context, int panelX, int panelY, int panelWidth, int panelHeight, List<RaceSessionManager.PlayerStatus> players) {
+	        int innerX = panelX + 10;
+	        int y = panelY + 10;
 
-            y += 12;
-        }
-    }
+	        List<RaceSessionManager.PlayerStatus> sortedPlayers = getPlayersSortedLeaderFirst(players);
+	        context.drawCenteredTextWithShadow(this.textRenderer,
+	                Text.literal("PLAYERS (" + sortedPlayers.size() + ")").formatted(Formatting.GOLD, Formatting.BOLD),
+	                panelX + panelWidth / 2, y, 0xFFFFAA00);
+	        y += 16;
 
-    private Identifier getPlayerSkinTexture(String playerName) {
-        if (client == null) {
-            return Identifier.of("textures/entity/player/wide/alex.png");
-        }
+	        int rowHeight = 26;
+	        int rowWidth = panelWidth - 20;
+	        for (int i = 0; i < sortedPlayers.size(); i++) {
+	            int rowY = y + i * rowHeight;
+	            int rowBoxHeight = rowHeight - 4;
+	            drawBox(context, innerX, rowY, rowWidth, rowBoxHeight);
 
-        String nameKey = normalizeNameKey(playerName);
-        Session session = client.getSession();
-        if (session != null && normalizeNameKey(session.getUsername()).equals(nameKey)) {
+	            RaceSessionManager.PlayerStatus p = sortedPlayers.get(i);
+	                Identifier skin = getPlayerSkinTexture(p.name());
+	                int headX = innerX + 2;
+	                int headY = rowY + 2;
+	                context.drawTexture(RenderPipelines.GUI_TEXTURED, skin, headX, headY, 8, 8, 16, 16, 8, 8, 64, 64);
+	                context.drawTexture(RenderPipelines.GUI_TEXTURED, skin, headX, headY, 40, 8, 16, 16, 8, 8, 64, 64);
+
+					if (p.isLeader()) {
+	                    context.fill(headX, headY, headX + 4, headY + 4, 0xFFAA00FF);
+	                }
+
+	                int nameX = innerX + 26;
+	                MutableText nameText = Text.literal(p.name()).formatted(Formatting.WHITE);
+	                context.drawTextWithShadow(this.textRenderer, nameText, nameX, rowY + 6, Colors.WHITE);
+
+	                String readyIcon = p.ready() ? "✔" : "✖";
+	                int readyColor = p.ready() ? 0xFF55FF55 : 0xFFCCCCCC;
+	                int readyX = innerX + rowWidth - 16;
+	                context.drawTextWithShadow(this.textRenderer, readyIcon, readyX, rowY + 8, readyColor);
+	        }
+	    }
+
+	    private static List<RaceSessionManager.PlayerStatus> getPlayersSortedLeaderFirst(List<RaceSessionManager.PlayerStatus> players) {
+	        if (players == null || players.isEmpty()) return List.of();
+	        int leaderIndex = -1;
+	        for (int i = 0; i < players.size(); i++) {
+	            if (players.get(i).isLeader()) {
+	                leaderIndex = i;
+	                break;
+	            }
+	        }
+	        if (leaderIndex <= 0) return players;
+	        java.util.ArrayList<RaceSessionManager.PlayerStatus> sorted = new java.util.ArrayList<>(players.size());
+	        sorted.add(players.get(leaderIndex));
+	        for (int i = 0; i < players.size(); i++) {
+	            if (i == leaderIndex) continue;
+	            sorted.add(players.get(i));
+	        }
+	        return sorted;
+	    }
+
+	    private Identifier getPlayerSkinTexture(String playerName) {
+	        if (client == null) {
+	            return Identifier.of("textures/entity/player/wide/alex.png");
+	        }
+
+	        String nameKey = normalizeNameKey(playerName);
+	        Session session = client.getSession();
+	        if (session != null && normalizeNameKey(session.getUsername()).equals(nameKey)) {
             UUID sessionUuid = session.getUuidOrNull();
             if (sessionUuid != null && client.getNetworkHandler() != null) {
                 PlayerListEntry entry = client.getNetworkHandler().getPlayerListEntry(sessionUuid);
@@ -420,86 +498,64 @@ public class RaceLobbyScreen extends Screen {
             }
 
             Supplier<SkinTextures> localSupplier = client.getSkinProvider().supplySkinTextures(client.getGameProfile(), false);
-            return localSupplier.get().body().texturePath();
-        }
+	            return localSupplier.get().body().texturePath();
+	        }
 
-        UUID skinUuid = resolveSkinUuid(playerName, nameKey);
-        Supplier<SkinTextures> supplier = skinSupplierByNameKey.computeIfAbsent(nameKey, k ->
-                client.getSkinProvider().supplySkinTextures(new GameProfile(skinUuid, playerName), false)
-        );
-        return supplier.get().body().texturePath();
-    }
+	        GameProfile profile = resolveSkinProfile(playerName, nameKey);
+	        Supplier<SkinTextures> supplier = skinSupplierByNameKey.computeIfAbsent(nameKey, k -> client.getSkinProvider().supplySkinTextures(profile, false));
+	        return supplier.get().body().texturePath();
+	    }
 
-    private Identifier getPlayerSkinTextureByUuid(UUID playerUuid, String playerName) {
-        if (client == null) {
-            return Identifier.of("textures/entity/player/wide/alex.png");
-        }
+	    private GameProfile resolveSkinProfile(String playerName, String nameKey) {
+	        Session session = client.getSession();
+	        if (session != null && normalizeNameKey(session.getUsername()).equals(nameKey)) {
+	            UUID uuid = session.getUuidOrNull();
+	            if (uuid != null) return client.getGameProfile();
+	        }
 
-        // Check if this is the local player
-        Session session = client.getSession();
-        UUID localUuid = session != null ? session.getUuidOrNull() : null;
-        if (localUuid != null && localUuid.equals(playerUuid)) {
-            // Use local player's skin
-            if (client.getNetworkHandler() != null) {
-                PlayerListEntry entry = client.getNetworkHandler().getPlayerListEntry(localUuid);
-                if (entry != null) return entry.getSkinTextures().body().texturePath();
-            }
-            Supplier<SkinTextures> localSupplier = client.getSkinProvider().supplySkinTextures(client.getGameProfile(), false);
-            return localSupplier.get().body().texturePath();
-        }
+	        GameProfile cached = mojangProfileByNameKey.get(nameKey);
+	        if (cached != null) return cached;
 
-        // Use server-provided UUID to fetch skin
-        String uuidKey = playerUuid.toString();
-        Supplier<SkinTextures> supplier = skinSupplierByUuidKey.computeIfAbsent(uuidKey, k ->
-                client.getSkinProvider().supplySkinTextures(new GameProfile(playerUuid, playerName), false)
-        );
-        return supplier.get().body().texturePath();
-    }
+	        startMojangProfileResolve(playerName, nameKey);
+	        UUID offline = UUID.nameUUIDFromBytes(("OfflinePlayer:" + playerName).getBytes(StandardCharsets.UTF_8));
+	        return new GameProfile(offline, playerName);
+	    }
 
-    private UUID resolveSkinUuid(String playerName, String nameKey) {
-        Session session = client.getSession();
-        if (session != null && normalizeNameKey(session.getUsername()).equals(nameKey)) {
-            UUID uuid = session.getUuidOrNull();
-            if (uuid != null) return uuid;
-        }
+	    private void startMojangProfileResolve(String playerName, String nameKey) {
+	        if (!mojangProfileResolveInFlight.add(nameKey)) return;
+	        ApiServices apiServices = client.getApiServices();
+	        if (apiServices == null) {
+	            mojangProfileResolveInFlight.remove(nameKey);
+	            return;
+	        }
 
-        UUID cached = mojangUuidByNameKey.get(nameKey);
-        if (cached != null) return cached;
+	        MinecraftClient clientRef = client;
+	        CompletableFuture
+	                .supplyAsync(
+	                        () -> {
+	                            GameProfile profile = apiServices.profileResolver().getProfileByName(playerName).orElse(null);
+	                            if (profile == null) return null;
 
-        startMojangUuidResolve(playerName, nameKey);
-        return UUID.nameUUIDFromBytes(("OfflinePlayer:" + playerName).getBytes(StandardCharsets.UTF_8));
-    }
+	                            try {
+	                                var result = apiServices.sessionService().fetchProfile(profile.id(), false);
+	                                if (result != null && result.profile() != null) return result.profile();
+	                            } catch (Exception ignored) {}
 
-    private void startMojangUuidResolve(String playerName, String nameKey) {
-        if (!mojangUuidResolveInFlight.add(nameKey)) return;
-        ApiServices apiServices = client.getApiServices();
-        if (apiServices == null) {
-            mojangUuidResolveInFlight.remove(nameKey);
-            return;
-        }
-
-        MinecraftClient clientRef = client;
-        CompletableFuture
-                .supplyAsync(
-                        () -> apiServices.profileResolver().getProfileByName(playerName).map(GameProfile::id).orElse(null),
-                        Util.getMainWorkerExecutor()
-                )
-                .thenAccept(uuid -> {
-                    if (uuid == null) {
-                        clientRef.execute(() -> mojangUuidResolveInFlight.remove(nameKey));
-                        return;
-                    }
-
-                    clientRef.execute(() -> {
-                        mojangUuidByNameKey.put(nameKey, uuid);
-                        skinSupplierByNameKey.remove(nameKey);
-                    });
-                })
-                .exceptionally(ex -> {
-                    clientRef.execute(() -> mojangUuidResolveInFlight.remove(nameKey));
-                    return null;
-                });
-    }
+	                            return profile;
+	                        },
+	                        Util.getMainWorkerExecutor()
+	                )
+	                .thenAccept(profile -> clientRef.execute(() -> {
+	                    mojangProfileResolveInFlight.remove(nameKey);
+	                    if (profile == null) return;
+	                    mojangProfileByNameKey.put(nameKey, profile);
+	                    skinSupplierByNameKey.remove(nameKey);
+	                }))
+	                .exceptionally(ex -> {
+	                    clientRef.execute(() -> mojangProfileResolveInFlight.remove(nameKey));
+	                    return null;
+	                });
+	    }
 
     private static String normalizeNameKey(String name) {
         if (name == null) return "";
@@ -511,15 +567,19 @@ public class RaceLobbyScreen extends Screen {
         if (race.getTargetItemId().isEmpty()) return;
 
         ItemStack stack = new ItemStack(Registries.ITEM.get(race.getTargetItemId().get()));
-        context.drawCenteredTextWithShadow(this.textRenderer, Text.translatable("speedrunigt.race.target"), centerX, y, Colors.WHITE);
-        context.drawItem(stack, centerX - 8, y + 14);
-        context.drawCenteredTextWithShadow(this.textRenderer, stack.getName(), centerX, y + 38, Colors.WHITE);
+        float itemScale = 3.0f;
+        int itemSize = (int) (16 * itemScale);
+        context.getMatrices().pushMatrix();
+        context.getMatrices().scale(itemScale, itemScale);
+        context.drawItem(stack, (int) (centerX / itemScale) - 8, (int) (y / itemScale));
+        context.getMatrices().popMatrix();
+        context.drawCenteredTextWithShadow(this.textRenderer, stack.getName(), centerX, y + itemSize + 4, Colors.WHITE);
     }
 
     private void renderCountdown(DrawContext context, int centerX, int centerY, int secondsRemaining) {
         if (secondsRemaining <= 0) return;
         Text text = Text.translatable("speedrunigt.race.countdown", secondsRemaining);
-        float scale = 2.0f;
+        float scale = 3.5f;
 
         context.getMatrices().pushMatrix();
         context.getMatrices().scale(scale, scale);
