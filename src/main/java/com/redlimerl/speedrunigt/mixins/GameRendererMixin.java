@@ -8,6 +8,7 @@ import com.redlimerl.speedrunigt.mixins.access.GameMenuScreenAccessor;
 import com.redlimerl.speedrunigt.option.SpeedRunOption;
 import com.redlimerl.speedrunigt.option.SpeedRunOptions;
 import com.redlimerl.speedrunigt.race.TargetItemHudOverlay;
+import com.redlimerl.speedrunigt.race.LeaderboardOverlay;
 import com.redlimerl.speedrunigt.timer.*;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
@@ -87,6 +88,7 @@ public class GameRendererMixin {
             SpeedRunIGTClient.TIMER_DRAWER.draw(drawContext);
         }
 
+        LeaderboardOverlay.render(this.client, drawContext);
         TargetItemHudOverlay.render(this.client, drawContext);
     }
 

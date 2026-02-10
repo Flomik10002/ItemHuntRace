@@ -26,6 +26,11 @@ import net.minecraft.util.Identifier;
 import net.minecraft.util.Formatting;
 import net.minecraft.world.Difficulty;
 import net.minecraft.world.GameMode;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.entity.projectile.FireworkRocketEntity;
+import net.minecraft.nbt.NbtCompound;
+import net.minecraft.nbt.NbtList;
 import net.minecraft.world.gen.GeneratorOptions;
 import net.minecraft.world.gen.WorldPreset;
 import net.minecraft.world.gen.WorldPresets;
@@ -60,10 +65,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Environment(EnvType.CLIENT)
 public final class RaceSessionManager {
     public enum ConnectionStatus { DISCONNECTED, CONNECTING, CONNECTED }
+    public enum HealthStatus { UNKNOWN, CHECKING, ONLINE, OFFLINE }
     public enum FinishReason { TARGET_OBTAINED, DEATH }
     private String activeRaceWorldName = null;
 
-    public record PlayerStatus(UUID id, String name, boolean ready) {}
+    public record PlayerStatus(UUID id, String name, boolean ready, boolean isLeader) {}
 
     public static final String SERVER_URI_PROPERTY = "speedrunigt.race.server";
 
@@ -77,9 +83,10 @@ public final class RaceSessionManager {
             .build();
 
     private volatile ConnectionStatus connectionStatus = ConnectionStatus.DISCONNECTED;
+    private volatile HealthStatus healthStatus = HealthStatus.UNKNOWN;
     private volatile String lastError = null;
 
-    private URI serverUri = URI.create(System.getProperty(SERVER_URI_PROPERTY, "ws://flomik.xyz:8080"));
+    private URI serverUri = URI.create(System.getProperty(SERVER_URI_PROPERTY, "ws://race.flomik.xyz:8080"));
     private WebSocket webSocket = null;
     private final Queue<String> pendingMessages = new ConcurrentLinkedQueue<>();
     private final StringBuilder partialMessage = new StringBuilder();
@@ -107,6 +114,85 @@ public final class RaceSessionManager {
 
     public ConnectionStatus getConnectionStatus() {
         return connectionStatus;
+    }
+
+    public void checkServerHealth() {
+        if (connectionStatus == ConnectionStatus.CONNECTING || connectionStatus == ConnectionStatus.CONNECTED) {
+            // Already connecting or connected
+            return;
+        }
+        
+        // Try to ping the server via WebSocket
+        try {
+            HttpClient tempClient = HttpClient.newHttpClient();
+            var timeoutTask = new java.util.concurrent.atomic.AtomicBoolean(false);
+            
+            // Schedule timeout (3 seconds)
+            var scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+            scheduler.schedule(() -> {
+                if (!timeoutTask.get()) {
+                    // Timeout - server did not respond
+                    MinecraftClient.getInstance().execute(() -> {
+                        connectionStatus = ConnectionStatus.DISCONNECTED;
+                    });
+                    timeoutTask.set(true);
+                }
+            }, 3, java.util.concurrent.TimeUnit.SECONDS);
+            
+            tempClient.newWebSocketBuilder()
+                    .buildAsync(serverUri, new WebSocket.Listener() {
+                        @Override
+                        public void onOpen(WebSocket webSocket) {
+                            // Send ping message
+                            webSocket.sendText("{\"type\":\"ping\"}", true);
+                            WebSocket.Listener.super.onOpen(webSocket);
+                        }
+
+                        @Override
+                        public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
+                            try {
+                                JsonObject json = JsonParser.parseString(data.toString()).getAsJsonObject();
+                                if ("pong".equals(json.get("type").getAsString())) {
+                                    // Server responded - it's online
+                                    if (!timeoutTask.get()) {
+                                        timeoutTask.set(true);
+                                        MinecraftClient.getInstance().execute(() -> {
+                                            connectionStatus = ConnectionStatus.CONNECTED;
+                                        });
+                                    }
+                                }
+                            } catch (Exception e) {
+                                // Ignore parse errors
+                            }
+                            webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "");
+                            scheduler.shutdown();
+                            return WebSocket.Listener.super.onText(webSocket, data, last);
+                        }
+
+                        @Override
+                        public void onError(WebSocket webSocket, Throwable error) {
+                            if (!timeoutTask.get()) {
+                                timeoutTask.set(true);
+                                MinecraftClient.getInstance().execute(() -> {
+                                    connectionStatus = ConnectionStatus.DISCONNECTED;
+                                });
+                            }
+                            scheduler.shutdown();
+                        }
+                    })
+                    .exceptionally(err -> {
+                        if (!timeoutTask.get()) {
+                            timeoutTask.set(true);
+                            MinecraftClient.getInstance().execute(() -> {
+                                connectionStatus = ConnectionStatus.DISCONNECTED;
+                            });
+                        }
+                        scheduler.shutdown();
+                        return null;
+                    });
+        } catch (Exception e) {
+            connectionStatus = ConnectionStatus.DISCONNECTED;
+        }
     }
 
     public String getLastError() {
@@ -156,7 +242,7 @@ public final class RaceSessionManager {
         return state == RaceState.RUNNING && targetItemId != null;
     }
 
-    private boolean isLocalPlayerLeader() {
+    public boolean isLocalPlayerLeader() {
         if (players.isEmpty()) return true;
         return normalizePlayerKey(players.get(0).name()).equals(normalizePlayerKey(getClientPlayerName()));
     }
@@ -258,7 +344,11 @@ public final class RaceSessionManager {
     }
 
     public void setReady(boolean ready) {
-        if (state != RaceState.LOBBY && state != RaceState.STARTING && state != RaceState.FINISHED) return;
+        if (state != RaceState.LOBBY && state != RaceState.STARTING && state != RaceState.FINISHED && state != RaceState.RUNNING) return;
+
+        if (state == RaceState.STARTING && !isLocalPlayerLeader()) {
+            return;
+        }
 
         localReady = ready;
         applyLocalReadyToPlayers();
@@ -270,6 +360,9 @@ public final class RaceSessionManager {
             if (state == RaceState.STARTING && !worldCreationRequested && MinecraftClient.getInstance().world == null) {
                 sendCancelStart();
                 cancelStarting();
+            } else if ((state == RaceState.FINISHED || state == RaceState.RUNNING) && isLocalPlayerLeader()) {
+                // Leader unreadying after game -> Reset Lobby
+                sendResetLobby();
             }
             return;
         }
@@ -342,6 +435,14 @@ public final class RaceSessionManager {
         send(msg);
     }
 
+    private void sendResetLobby() {
+        JsonObject msg = new JsonObject();
+        msg.addProperty("type", "reset_lobby");
+        msg.addProperty("roomCode", roomCode);
+        msg.addProperty("playerName", getClientPlayerName());
+        send(msg);
+    }
+
     private void cancelStarting() {
         if (state != RaceState.STARTING) return;
         state = RaceState.LOBBY;
@@ -364,7 +465,7 @@ public final class RaceSessionManager {
             PlayerStatus p = players.get(i);
             if (normalizePlayerKey(p.name()).equals(local)) {
                 if (p.ready() != localReady) {
-                    players.set(i, new PlayerStatus(p.id(), p.name(), localReady));
+                    players.set(i, new PlayerStatus(p.id(), p.name(), localReady, p.isLeader()));
                 }
                 return;
             }
@@ -404,7 +505,7 @@ public final class RaceSessionManager {
 
         finishTimesByPlayerName.put(
                 normalizePlayerKey(getClientPlayerName()),
-                new FinishTime(timer.getInGameTime(false), timer.getRealTimeAttack())
+                new FinishTime(timer.getInGameTime(false), timer.getRealTimeAttack(), reason == FinishReason.DEATH)
         );
 
         JsonObject msg = new JsonObject();
@@ -544,6 +645,17 @@ public final class RaceSessionManager {
                 lastError = null;
             }
             case "room_update" -> {
+                if (msg.has("state")) {
+                    String s = msg.get("state").getAsString();
+                    if ("lobby".equals(s) && state != RaceState.LOBBY && state != RaceState.IDLE) {
+                        // Server forced reset to lobby
+                        cancelStarting();
+                        state = RaceState.LOBBY;
+                        finishTimesByPlayerName.clear();
+                        finishTriggered.set(false);
+                    }
+                }
+                
                 if (msg.has("players") && msg.get("players").isJsonArray()) {
                     players.clear();
                     parsePlayers(msg.getAsJsonArray("players"));
@@ -561,7 +673,7 @@ public final class RaceSessionManager {
                     if (rta == null) rta = getLongFromKeys(time, "rtaMs", "rta", "rta_ms", "rtaMillis", "rta_millis");
                 }
                 if (player != null && igt != null && rta != null) {
-                    finishTimesByPlayerName.put(normalizePlayerKey(player), new FinishTime(igt, rta));
+                    finishTimesByPlayerName.put(normalizePlayerKey(player), new FinishTime(igt, rta, false));
                 }
             }
             case "advancement" -> {
@@ -579,10 +691,12 @@ public final class RaceSessionManager {
 
                 if (player == null || reason == null) return;
 
-                if ("death".equals(reason)) {
+                if ("death".equals(reason) || "eliminated".equals(reason)) {
+                    finishTimesByPlayerName.put(normalizePlayerKey(player), new FinishTime(rta, igt, true));
                     sendSystemChat("§7☠ " + player + " died (" + InGameTimerUtils.timeToStringFormat(rta) + ")");
                 } else {
-                    sendWinnerChat(player, new FinishTime(igt, rta));
+                    finishTimesByPlayerName.put(normalizePlayerKey(player), new FinishTime(rta, igt, false));
+                    sendFinishChat(player, new FinishTime(rta, igt, false));
                 }
             }
             case "winner" -> {
@@ -593,13 +707,18 @@ public final class RaceSessionManager {
                 if (time == null) {
                     Long igt = getLongFromKeys(msg, "igtMs", "igt", "igt_ms", "igtMillis", "igt_millis");
                     Long rta = getLongFromKeys(msg, "rtaMs", "rta", "rta_ms", "rtaMillis", "rta_millis");
-                    if (igt != null && rta != null) time = new FinishTime(igt, rta);
+                    if (igt != null && rta != null) time = new FinishTime(igt, rta, false);
                 }
                 if (time == null && normalizePlayerKey(winner).equals(normalizePlayerKey(getClientPlayerName()))) {
                     InGameTimer timer = InGameTimer.getInstance();
-                    time = new FinishTime(timer.getInGameTime(false), timer.getRealTimeAttack());
+                    time = new FinishTime(timer.getInGameTime(false), timer.getRealTimeAttack(), false);
                 }
-                sendWinnerChat(winner, time);
+                
+                if (normalizePlayerKey(winner).equals(normalizePlayerKey(getClientPlayerName()))) {
+                    spawnFireworks();
+                }
+
+                sendWinnerAnnouncement(winner, time);
             }
             case "start_cancelled", "cancel_start", "starting_cancelled", "start_cancel", "cancel_start_request", "stop_start", "abort_start" -> {
                 if (state == RaceState.STARTING) cancelStarting();
@@ -654,7 +773,8 @@ public final class RaceSessionManager {
         timerConfigured = true;
 
         InGameTimer timer = InGameTimer.getInstance();
-        if (timer.getStatus() == TimerStatus.NONE && pendingWorldDirectoryName != null && !pendingWorldDirectoryName.isEmpty()) {
+        // Force start a new timer for the race, even if one exists
+        if (pendingWorldDirectoryName != null && !pendingWorldDirectoryName.isEmpty()) {
             InGameTimer.start(pendingWorldDirectoryName, RunType.fromBoolean(InGameTimerUtils.IS_SET_SEED));
             timer = InGameTimer.getInstance();
         }
@@ -668,8 +788,9 @@ public final class RaceSessionManager {
             JsonObject o = el.getAsJsonObject();
             String name = o.has("name") ? o.get("name").getAsString() : "Unknown";
             boolean ready = o.has("ready") && o.get("ready").getAsBoolean();
+            boolean isLeader = o.has("isLeader") && o.get("isLeader").getAsBoolean();
             UUID id = o.has("id") ? safeUuid(o.get("id").getAsString()) : UUID.nameUUIDFromBytes(name.getBytes(StandardCharsets.UTF_8));
-            players.add(new PlayerStatus(id, name, ready));
+            players.add(new PlayerStatus(id, name, ready, isLeader));
         }
     }
 
@@ -696,50 +817,138 @@ public final class RaceSessionManager {
         return client.getSession() != null ? client.getSession().getUsername() : "Player";
     }
 
-    private record FinishTime(long igtMs, long rtaMs) {}
+    private record FinishTime(long igtMs, long rtaMs, boolean eliminated) {}
+
+    public record LeaderboardEntry(String name, String time) {}
+
+    public List<LeaderboardEntry> getLeaderboard() {
+        if (finishTimesByPlayerName.isEmpty()) return List.of();
+        
+        List<java.util.Map.Entry<String, FinishTime>> sorted = new ArrayList<>(finishTimesByPlayerName.entrySet());
+        sorted.sort((e1, e2) -> {
+            FinishTime t1 = e1.getValue();
+            FinishTime t2 = e2.getValue();
+            if (t1.eliminated && !t2.eliminated) return 1; // Eliminated players at bottom
+            if (!t1.eliminated && t2.eliminated) return -1;
+            return Long.compare(t1.rtaMs, t2.rtaMs);
+        });
+        
+        List<LeaderboardEntry> result = new ArrayList<>();
+        for (java.util.Map.Entry<String, FinishTime> entry : sorted) {
+            FinishTime t = entry.getValue();
+            String timeStr = t.eliminated ? "§cLOSE" : InGameTimerUtils.timeToStringFormat(t.rtaMs);
+            result.add(new LeaderboardEntry(entry.getKey(), timeStr));
+        }
+        return result;
+    }
 
     private void sendAdvancementChat(String playerName, Identifier advancementId) {
+        if (advancementId == null) return;
+        
+        // Ignore "recipes/" and "/root" advancements
+        String idStr = advancementId.toString();
+        if (idStr.startsWith("minecraft:recipes/") || idStr.endsWith("/root")) return;
+
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.inGameHud == null) return;
 
-        Text title = advancementId != null ? Text.literal(advancementId.toString()) : Text.literal("unknown");
+        MutableText title = null;
+
+        // Try to get translated title from ClientAdvancementManager
         try {
-            if (advancementId != null && client.getNetworkHandler() != null) {
+            if (client.getNetworkHandler() != null) {
                 ClientAdvancementManager handler = client.getNetworkHandler().getAdvancementHandler();
                 if (handler != null) {
                     PlacedAdvancement placed = handler.getManager().get(advancementId);
                     if (placed != null && placed.getAdvancement().display().isPresent()) {
-                        title = placed.getAdvancement().display().get().getTitle();
+                         title = placed.getAdvancement().display().get().getTitle().copy();
                     }
                 }
             }
         } catch (Exception ignored) {}
 
+        // Fallback if no translation found
+        if (title == null) {
+             String path = advancementId.getPath();
+             if (path.contains("/")) path = path.substring(path.lastIndexOf('/') + 1);
+             String readable = path.replace("_", " ");
+             if (!readable.isEmpty()) {
+                 readable = Character.toUpperCase(readable.charAt(0)) + readable.substring(1);
+             }
+             title = Text.literal(readable);
+        }
+
         client.inGameHud.getChatHud().addMessage(
                 Text.translatable(
                                 "speedrunigt.race.chat.advancement",
                                 Text.literal(playerName).formatted(Formatting.GOLD),
-                                title.copy().formatted(Formatting.GREEN)
+                                title.formatted(Formatting.GREEN)
                         )
                         .formatted(Formatting.WHITE)
         );
     }
 
-    private void sendWinnerChat(String winnerName, FinishTime time) {
+    private void sendWinnerAnnouncement(String winnerName, FinishTime time) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.inGameHud == null) return;
         ChatHud chat = client.inGameHud.getChatHud();
 
         MutableText line1 = Text.literal("🏆 ").formatted(Formatting.YELLOW)
-                .append(Text.translatable("speedrunigt.race.chat.winner_prefix").formatted(Formatting.WHITE))
-                .append(Text.literal(winnerName).formatted(Formatting.GOLD));
+                .append(Text.translatable("speedrunigt.race.chat.winner_prefix").formatted(Formatting.WHITE)) // "Winner: "
+                .append(Text.literal(winnerName).formatted(Formatting.GOLD).formatted(Formatting.BOLD));
         chat.addMessage(line1);
 
-        String igt = time != null ? InGameTimerUtils.timeToStringFormat(time.igtMs()) : "--:--.---";
-        String rta = time != null ? InGameTimerUtils.timeToStringFormat(time.rtaMs()) : "--:--.---";
-        chat.addMessage(Text.translatable("speedrunigt.race.chat.time", igt, rta).formatted(Formatting.WHITE));
+        if (time != null) {
+            String igt = InGameTimerUtils.timeToStringFormat(time.igtMs());
+            String rta = InGameTimerUtils.timeToStringFormat(time.rtaMs());
+            chat.addMessage(Text.translatable("speedrunigt.race.chat.time", igt, rta).formatted(Formatting.GRAY));
+        }
     }
 
+    private void sendFinishChat(String playerName, FinishTime time) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.inGameHud == null) return;
+        ChatHud chat = client.inGameHud.getChatHud();
+
+        // "Player finished in 12:34.567"
+        MutableText msg = Text.literal("🏁 ").formatted(Formatting.AQUA)
+                .append(Text.literal(playerName).formatted(Formatting.WHITE))
+                .append(Text.literal(" finished in ").formatted(Formatting.GRAY))
+                .append(Text.literal(InGameTimerUtils.timeToStringFormat(time.rtaMs())).formatted(Formatting.YELLOW));
+        
+        chat.addMessage(msg);
+    }
+
+    private void spawnFireworks() {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null || client.world == null) return;
+        
+        ItemStack stack = new ItemStack(Items.FIREWORK_ROCKET);
+        NbtCompound fireworks = new NbtCompound();
+        NbtList explosions = new NbtList();
+        
+        // Add a few explosions
+        for (int i = 0; i < 3; i++) {
+             NbtCompound explosion = new NbtCompound();
+             explosion.putBoolean("Flicker", true);
+             explosion.putBoolean("Trail", true);
+             explosion.putInt("Type", 1); // Large Ball
+             // Colors (int array)
+             explosion.putIntArray("Colors", new int[]{0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00});
+             explosions.add(explosion);
+        }
+        
+        fireworks.put("Explosions", explosions);
+        fireworks.putByte("Flight", (byte) 1);
+        
+        NbtCompound tag = new NbtCompound();
+        // NBT API changed in 1.21, disabling visuals for now to fix build
+        // tag.put("Fireworks", fireworks);
+        // stack.setNbt(tag);
+        
+        // FireworkRocketEntity rocket = new FireworkRocketEntity(client.world, client.player.getX(), client.player.getY(), client.player.getZ(), stack);
+        // client.world.spawnEntity(rocket);
+    }
     private static String getStringFromKeys(JsonObject obj, String... keys) {
         for (String key : keys) {
             if (obj.has(key) && obj.get(key).isJsonPrimitive()) {

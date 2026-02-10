@@ -33,7 +33,7 @@ public final class TargetItemTracker {
         }
 
         if (!player.isAlive()) {
-            race.finishRun(RaceSessionManager.FinishReason.DEATH);
+             race.finishRun(RaceSessionManager.FinishReason.DEATH);
         }
     }
 

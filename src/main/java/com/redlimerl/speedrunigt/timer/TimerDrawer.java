@@ -378,7 +378,6 @@ public class TimerDrawer {
 
     }
 
-
     public static class Position {
         private int x;
         private int y;
